@@ -5,7 +5,7 @@ botão **Nova nota**, pasta fixa para tudo que você cria e barra de formataçã
 (negrito, itálico, sublinhado, tachado, destaque, título, tópicos, numerada, tarefa, código).
 
 Cada nota é um arquivo `.md` comum. Cor, fixação e data de criação ficam no frontmatter
-(`color`, `pinned` e `created`), então nada depende do plugin para continuar legível.
+(`color`, `pinned`, `created` e, nas notas sem título, `untitled`), então nada depende do plugin para continuar legível.
 
 ![Prévia da grade de notas](preview.png)
 
@@ -31,9 +31,9 @@ Sem build, sem `npm`: o plugin é JavaScript puro.
 | Ação | Como |
 | --- | --- |
 | Abrir a grade | Ícone de post-it na barra lateral, ou comando **Abrir notas rápidas** |
-| Nova nota | Botão **Nova nota**, ícone de "arquivo +" na barra lateral, ou comando **Nova nota rápida**. Um cartão-rascunho aparece na grade; o título é obrigatório |
+| Nova nota | Botão **Nova nota**, ícone de "arquivo +" na barra lateral, ou comando **Nova nota rápida**. Um cartão-rascunho aparece na grade; o título é opcional |
 | Editar o texto | Clique no texto do cartão e escreva ali mesmo. Salva sozinho ao sair do cartão (ou `Ctrl+Enter`) |
-| Editar o título | Clique no título do cartão |
+| Editar o título | Clique no título do cartão. Apagar o título volta ao nome automático |
 | Barra de formatação | Menu **⋮** → **Formatação de texto** (os atalhos de teclado funcionam sempre) |
 | Mudar a cor | Menu **⋮** → **Mudar cor** |
 | Fixar | Alfinete no canto do cartão, ou menu **⋮** |
@@ -42,6 +42,9 @@ Sem build, sem `npm`: o plugin é JavaScript puro.
 | Abrir como nota normal | Menu **⋮** → **Abrir como nota** |
 
 A data de criação aparece no canto inferior do cartão (`DD-MM-AA`) e fica gravada no frontmatter (`created`).
+
+Nota sem título recebe como nome de arquivo a data e a hora (`2026-11-24 14h04.md`) e a marca `untitled: true`
+no frontmatter. No painel ela aparece sem título; o nome automático só existe na pasta.
 
 Atalhos no editor: `Ctrl+B` negrito, `Ctrl+I` itálico, `Ctrl+U` sublinhado,
 `Ctrl+Shift+X` tachado, `Ctrl+Shift+C` tarefa, `Ctrl+Shift+8` tópicos, `Ctrl+Enter` concluir, `Esc` sair.

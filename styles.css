@@ -241,8 +241,10 @@
 .keep-card-title:hover, .keep-card-title:focus { background: rgba(0,0,0,.05); }
 .keep-card-title:focus { outline: none; box-shadow: none; }
 .theme-dark .keep-card-title:hover, .theme-dark .keep-card-title:focus { background: rgba(255,255,255,.08); }
-.keep-card-title.is-invalid { box-shadow: 0 0 0 2px var(--text-error); }
 .keep-card-title::placeholder { color: inherit; opacity: .45; }
+/* Nota sem título: o campo só se revela ao passar o mouse ou editar */
+.keep-card.is-untitled:not(:hover):not(:focus-within):not(.is-editing) .keep-card-title::placeholder { opacity: 0; }
+.is-mobile .keep-card.is-untitled .keep-card-title::placeholder { opacity: .3; }
 
 .keep-card-body {
   font-size: 13.5px;

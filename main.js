@@ -39,6 +39,7 @@ const DEFAULT_SETTINGS = {
 
 const RE_FRONTMATTER = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/;
 const RE_MARCADOR_LISTA = /^(?:[-*+]|\d+\.)\s+(?:\[[ xX]\]\s+)?/;
+const RE_NOME_AUTO = /^(?:Nota )?\d{4}-\d{2}-\d{2} \d{2}h\d{2}(?: \d+)?$/;
 const RE_TAREFA = /^(\s*(?:[-*+]|\d+\.)\s+\[)( |x|X)(\])/;
 
 // ---------------------------------------------------------------------------
@@ -276,7 +277,18 @@ class KeepNotesPlugin extends Plugin {
     const cor = CORES_IDS.has(fm.color) ? fm.color : 'default';
     const fixada = fm.pinned === true || fm.pinned === 'true';
     const criada = fm.created ? moment(String(fm.created), ['YYYY-MM-DD', moment.ISO_8601]) : moment(file.stat.ctime);
-    return { cor, fixada, criada: criada.isValid() ? criada : moment(file.stat.ctime) };
+    const semTitulo = fm.untitled === true || fm.untitled === 'true' || RE_NOME_AUTO.test(file.basename);
+    return { cor, fixada, semTitulo, criada: criada.isValid() ? criada : moment(file.stat.ctime) };
+  }
+
+  nomeAutomatico(quando = moment()) {
+    return quando.format('YYYY-MM-DD HH[h]mm');
+  }
+
+  async definirSemTitulo(file, semTitulo) {
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      if (semTitulo) fm.untitled = true; else delete fm.untitled;
+    });
   }
 
   async lerCorpo(file) {
@@ -329,14 +341,32 @@ class KeepNotesPlugin extends Plugin {
     }
   }
 
+  // Sem título, o arquivo recebe data e hora como nome e a marca `untitled`,
+  // para o painel não mostrar esse nome.
   async criarNota({ titulo = '', corpo = '', cor } = {}) {
-    const nome = sanitizarNome(titulo);
-    if (!nome) throw new Error('A nota precisa de um título.');
+    const agora = moment();
+    const nomeDado = sanitizarNome(titulo);
+    const semTitulo = !nomeDado;
     const pasta = await this.garantirPasta();
-    const unico = this.nomeUnico(pasta.path, nome);
+    const unico = this.nomeUnico(pasta.path, semTitulo ? this.nomeAutomatico(agora) : nomeDado);
     const corFinal = CORES_IDS.has(cor) ? cor : this.settings.corPadrao;
-    const conteudo = `---\ncolor: ${corFinal}\npinned: false\ncreated: ${moment().format('YYYY-MM-DD')}\n---\n${corpo}`;
+    const fm = [`color: ${corFinal}`, 'pinned: false', `created: ${agora.format('YYYY-MM-DD')}`];
+    if (semTitulo) fm.push('untitled: true');
+    const conteudo = `---\n${fm.join('\n')}\n---\n${corpo}`;
     return this.app.vault.create(`${pasta.path}/${unico}.md`, conteudo);
+  }
+
+  // Aplica um título digitado no cartão: vazio volta ao nome automático.
+  async definirTitulo(file, titulo, semTituloAtual) {
+    const nome = sanitizarNome(titulo);
+    if (nome) {
+      if (nome !== file.basename) await this.renomear(file, nome);
+      if (semTituloAtual) await this.definirSemTitulo(file, false);
+      return;
+    }
+    if (semTituloAtual) return;
+    await this.renomear(file, this.nomeAutomatico(moment(file.stat.ctime)));
+    await this.definirSemTitulo(file, true);
   }
 
   async renomear(file, novoTitulo) {
@@ -446,7 +476,7 @@ class KeepView extends ItemView {
       : (n) => n.criada.valueOf();
     notas.sort((a, b) => (b.fixada - a.fixada) || (chave(b) - chave(a)) || a.file.basename.localeCompare(b.file.basename));
     if (!this.busca) return notas;
-    return notas.filter((n) => (n.file.basename + '\n' + n.corpo).toLowerCase().includes(this.busca));
+    return notas.filter((n) => ((n.semTitulo ? '' : n.file.basename) + '\n' + n.corpo).toLowerCase().includes(this.busca));
   }
 
   async render() {
@@ -542,7 +572,7 @@ class KeepView extends ItemView {
   }
 
   montarCard(nota) {
-    const { file, cor, fixada, corpo, criada } = nota;
+    const { file, cor, fixada, corpo, criada, semTitulo } = nota;
     const card = createDiv({ cls: 'keep-card', attr: { 'data-color': cor } });
     let pronto = Promise.resolve();
     let corpoAtual = corpo;
@@ -553,18 +583,16 @@ class KeepView extends ItemView {
     pin.addEventListener('click', (ev) => { ev.stopPropagation(); this.plugin.definirFixada(file, !fixada); });
 
     // Título editável
-    const titulo = card.createEl('input', { type: 'text', cls: 'keep-card-title', value: file.basename, attr: { placeholder: 'Título', spellcheck: 'false' } });
+    const titulo = card.createEl('input', { type: 'text', cls: 'keep-card-title', value: semTitulo ? '' : file.basename, attr: { placeholder: 'Título', spellcheck: 'false' } });
+    if (semTitulo) card.addClass('is-untitled');
     titulo.addEventListener('focus', () => { this.editando = card; });
     titulo.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') { ev.preventDefault(); entrarEdicao(); }
-      if (ev.key === 'Escape') { ev.preventDefault(); titulo.value = file.basename; titulo.blur(); }
+      if (ev.key === 'Escape') { ev.preventDefault(); titulo.value = semTitulo ? '' : file.basename; titulo.blur(); }
     });
     titulo.addEventListener('change', async () => {
-      const novo = sanitizarNome(titulo.value);
-      if (!novo) { titulo.value = file.basename; new Notice('A nota precisa de um título.'); return; }
-      if (novo === file.basename) return;
-      try { await this.plugin.renomear(file, novo); }
-      catch (e) { titulo.value = file.basename; new Notice('Não foi possível renomear: ' + e.message); }
+      try { await this.plugin.definirTitulo(file, titulo.value, semTitulo); }
+      catch (e) { titulo.value = semTitulo ? '' : file.basename; new Notice('Não foi possível renomear: ' + e.message); }
     });
 
     // Corpo renderizado
@@ -700,7 +728,7 @@ class KeepView extends ItemView {
     this.rascunhoEl = card;
     this.editando = card;
 
-    const titulo = card.createEl('input', { type: 'text', cls: 'keep-card-title', attr: { placeholder: 'Título (obrigatório)', spellcheck: 'false' } });
+    const titulo = card.createEl('input', { type: 'text', cls: 'keep-card-title', attr: { placeholder: 'Título', spellcheck: 'false' } });
     const ta = card.createEl('textarea', { cls: 'keep-card-edit', attr: { placeholder: 'Escreva aqui...', rows: 3 } });
     const fmt = new Formatador(ta, () => autoAltura(ta));
     const barra = montarBarra(card, fmt);
@@ -727,15 +755,9 @@ class KeepView extends ItemView {
       if (this.editando === card) this.terminarEdicao();
     };
     const salvar = async () => {
-      const nome = sanitizarNome(titulo.value);
-      if (!nome) {
-        titulo.addClass('is-invalid');
-        new Notice('Dê um título à nota antes de salvar.');
-        titulo.focus();
-        return false;
-      }
+      if (!titulo.value.trim() && !ta.value.trim()) { descartar(); return false; }
       try {
-        await this.plugin.criarNota({ titulo: nome, corpo: ta.value.trim() ? ta.value.trim() + '\n' : '', cor: corEscolhida });
+        await this.plugin.criarNota({ titulo: titulo.value, corpo: ta.value.trim() ? ta.value.trim() + '\n' : '', cor: corEscolhida });
         descartar();
         return true;
       } catch (e) {
@@ -746,7 +768,6 @@ class KeepView extends ItemView {
 
     btnDescartar.addEventListener('click', descartar);
     btnSalvar.addEventListener('click', salvar);
-    titulo.addEventListener('input', () => titulo.removeClass('is-invalid'));
     titulo.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') { ev.preventDefault(); ta.focus(); }
       if (ev.key === 'Escape') { ev.preventDefault(); descartar(); }
@@ -757,13 +778,12 @@ class KeepView extends ItemView {
       if (ev.key === 'Escape') { ev.preventDefault(); descartar(); return; }
       fmt.atalho(ev);
     });
-    // Ao sair do rascunho: salva se tem título; descarta se está vazio; senão mantém.
+    // Ao sair do rascunho: salva se tem algo; descarta se está vazio.
     card.addEventListener('focusout', (ev) => {
       if (ev.relatedTarget && card.contains(ev.relatedTarget)) return;
       setTimeout(() => {
         if (!card.isConnected || card.contains(document.activeElement)) return;
-        if (!titulo.value.trim() && !ta.value.trim()) descartar();
-        else if (titulo.value.trim()) salvar();
+        salvar();
       }, 0);
     });
 
