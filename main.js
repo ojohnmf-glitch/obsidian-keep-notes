@@ -1,7 +1,7 @@
 'use strict';
 
 const {
-  Plugin, ItemView, Modal, PluginSettingTab, Setting, TFile, TFolder,
+  Plugin, ItemView, Menu, PluginSettingTab, Setting, TFile, TFolder,
   MarkdownRenderer, Notice, setIcon, normalizePath, moment,
 } = require('obsidian');
 
@@ -272,7 +272,8 @@ class KeepNotesPlugin extends Plugin {
     const fm = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
     const cor = CORES_IDS.has(fm.color) ? fm.color : 'default';
     const fixada = fm.pinned === true || fm.pinned === 'true';
-    return { cor, fixada };
+    const criada = fm.created ? moment(String(fm.created), ['YYYY-MM-DD', moment.ISO_8601]) : moment(file.stat.ctime);
+    return { cor, fixada, criada: criada.isValid() ? criada : moment(file.stat.ctime) };
   }
 
   async lerCorpo(file) {
@@ -322,11 +323,13 @@ class KeepNotesPlugin extends Plugin {
   }
 
   async criarNota({ titulo = '', corpo = '', cor } = {}) {
+    const nome = sanitizarNome(titulo);
+    if (!nome) throw new Error('A nota precisa de um título.');
     const pasta = await this.garantirPasta();
-    const nome = this.nomeUnico(pasta.path, sanitizarNome(titulo) || `Nota ${moment().format('YYYY-MM-DD HH[h]mm')}`);
+    const unico = this.nomeUnico(pasta.path, nome);
     const corFinal = CORES_IDS.has(cor) ? cor : this.settings.corPadrao;
-    const conteudo = `---\ncolor: ${corFinal}\npinned: false\n---\n${corpo}`;
-    return this.app.vault.create(`${pasta.path}/${nome}.md`, conteudo);
+    const conteudo = `---\ncolor: ${corFinal}\npinned: false\ncreated: ${moment().format('YYYY-MM-DD')}\n---\n${corpo}`;
+    return this.app.vault.create(`${pasta.path}/${unico}.md`, conteudo);
   }
 
   async renomear(file, novoTitulo) {
@@ -354,9 +357,8 @@ class KeepNotesPlugin extends Plugin {
   }
 
   async novaNota() {
-    const file = await this.criarNota();
-    await this.abrirView();
-    new EditorModal(this.app, this, file).open();
+    const leaf = await this.abrirView();
+    if (leaf.view instanceof KeepView) leaf.view.novoRascunho();
   }
 }
 
@@ -370,6 +372,9 @@ class KeepView extends ItemView {
     this.plugin = plugin;
     this.busca = '';
     this.grades = [];
+    this.editando = null;        // path do cartão em edição (ou '__rascunho__')
+    this.renderPendente = false;
+    this.rascunhoEl = null;
     this.recarregar = debounce(() => this.render(), 150);
     this.aoRedimensionar = debounce(() => this.redistribuirTudo(), 100);
   }
@@ -383,7 +388,6 @@ class KeepView extends ItemView {
     root.empty();
     root.addClass('keep-root');
 
-    // Cabeçalho: busca + botão Nova nota
     const header = root.createDiv({ cls: 'keep-header' });
     const buscaWrap = header.createDiv({ cls: 'keep-search' });
     setIcon(buscaWrap.createSpan({ cls: 'keep-search-icon' }), 'search');
@@ -393,17 +397,13 @@ class KeepView extends ItemView {
     const btnNova = header.createEl('button', { cls: 'keep-btn-nova mod-cta' });
     setIcon(btnNova.createSpan(), 'plus');
     btnNova.createSpan({ text: 'Nova nota' });
-    btnNova.addEventListener('click', () => this.plugin.novaNota());
-
-    // Compositor rápido ("Criar uma nota...")
-    this.montarCompositor(root);
+    btnNova.addEventListener('click', () => this.novoRascunho());
 
     this.gridEl = root.createDiv({ cls: 'keep-sections' });
     this.ro = new ResizeObserver(() => this.aoRedimensionar());
     this.ro.observe(this.gridEl);
 
     const v = this.app.vault;
-    const mc = this.app.metadataCache;
     const soPasta = (f) => { if (this.plugin.pertenceAPasta(f) || f instanceof TFolder) this.recarregar(); };
     this.registerEvent(v.on('create', soPasta));
     this.registerEvent(v.on('modify', soPasta));
@@ -411,60 +411,23 @@ class KeepView extends ItemView {
     this.registerEvent(v.on('rename', (f, antigo) => {
       if (this.plugin.pertenceAPasta(f) || antigo.startsWith(this.plugin.pasta + '/')) this.recarregar();
     }));
-    this.registerEvent(mc.on('changed', soPasta));
+    this.registerEvent(this.app.metadataCache.on('changed', soPasta));
 
     await this.render();
   }
 
-  montarCompositor(root) {
-    const comp = root.createDiv({ cls: 'keep-composer', attr: { 'data-color': this.plugin.settings.corPadrao } });
-    const titulo = comp.createEl('input', { type: 'text', placeholder: 'Título', cls: 'keep-composer-title' });
-    const ta = comp.createEl('textarea', { placeholder: 'Criar uma nota...', cls: 'keep-composer-body', attr: { rows: 1 } });
-    const fmt = new Formatador(ta, () => autoAltura(ta));
-    const rodape = comp.createDiv({ cls: 'keep-composer-footer' });
-    montarBarra(rodape, fmt);
-    let cor = this.plugin.settings.corPadrao;
-    montarPaleta(rodape, cor, (c) => { cor = c; comp.setAttribute('data-color', c); });
-    const acoes = rodape.createDiv({ cls: 'keep-composer-actions' });
-    const btnFechar = acoes.createEl('button', { text: 'Fechar', cls: 'keep-btn-ghost' });
-    const btnSalvar = acoes.createEl('button', { text: 'Salvar', cls: 'mod-cta' });
-
-    const abrir = () => { comp.addClass('is-open'); autoAltura(ta); };
-    const fechar = () => {
-      comp.removeClass('is-open');
-      titulo.value = ''; ta.value = ''; ta.style.height = '';
-      cor = this.plugin.settings.corPadrao;
-      comp.setAttribute('data-color', cor);
-      comp.querySelectorAll('.keep-color-dot').forEach((d) => d.toggleClass('is-active', d.dataset.color === cor));
-    };
-    const salvar = async () => {
-      if (!titulo.value.trim() && !ta.value.trim()) return fechar();
-      await this.plugin.criarNota({ titulo: titulo.value, corpo: ta.value.trim() + '\n', cor });
-      fechar();
-    };
-
-    ta.addEventListener('focus', abrir);
-    titulo.addEventListener('focus', abrir);
-    ta.addEventListener('input', () => autoAltura(ta));
-    ta.addEventListener('keydown', (ev) => {
-      if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') { ev.preventDefault(); salvar(); return; }
-      if (ev.key === 'Escape') { ev.preventDefault(); salvar(); ta.blur(); return; }
-      fmt.atalho(ev);
-    });
-    titulo.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') { ev.preventDefault(); ta.focus(); }
-      if (ev.key === 'Escape') { ev.preventDefault(); salvar(); titulo.blur(); }
-    });
-    btnFechar.addEventListener('click', salvar); // "Fechar" no Keep também salva
-    btnSalvar.addEventListener('click', salvar);
+  async onClose() {
+    if (this.ro) this.ro.disconnect();
   }
+
+  // ---- carregamento e layout -------------------------------------------
 
   async carregarNotas() {
     const arquivos = this.plugin.listarNotas();
     const notas = await Promise.all(arquivos.map(async (file) => {
-      const { cor, fixada } = this.plugin.lerMeta(file);
+      const meta = this.plugin.lerMeta(file);
       const corpo = await this.plugin.lerCorpo(file);
-      return { file, cor, fixada, corpo };
+      return { file, corpo, ...meta };
     }));
     notas.sort((a, b) => (b.fixada - a.fixada) || (b.file.stat.mtime - a.file.stat.mtime));
     if (!this.busca) return notas;
@@ -473,7 +436,11 @@ class KeepView extends ItemView {
 
   async render() {
     if (!this.gridEl) return;
+    // Não redesenha enquanto um cartão está sendo editado: isso destruiria o campo.
+    if (this.editando) { this.renderPendente = true; return; }
+    this.renderPendente = false;
     const notas = await this.carregarNotas();
+    if (this.editando) { this.renderPendente = true; return; }
     this.gridEl.empty();
     this.grades = [];
     this.gridEl.style.setProperty('--keep-card-w', `${this.plugin.settings.larguraCard}px`);
@@ -481,7 +448,7 @@ class KeepView extends ItemView {
     if (!notas.length) {
       const vazio = this.gridEl.createDiv({ cls: 'keep-empty' });
       setIcon(vazio.createSpan({ cls: 'keep-empty-icon' }), 'sticky-note');
-      vazio.createDiv({ text: this.busca ? 'Nenhuma nota corresponde à pesquisa.' : 'As notas que você criar aparecem aqui.' });
+      vazio.createDiv({ text: this.busca ? 'Nenhuma nota corresponde à pesquisa.' : 'Clique em "Nova nota" para começar.' });
       return;
     }
 
@@ -506,7 +473,6 @@ class KeepView extends ItemView {
     }
     this.grades.push({ grade, cards });
     this.distribuir(grade, cards);
-    // Depois que o Markdown de todos renderizou, redistribui com as alturas reais.
     Promise.all(prontos).then(() => this.distribuir(grade, cards));
   }
 
@@ -516,6 +482,7 @@ class KeepView extends ItemView {
     const gap = 14;
     const largura = grade.clientWidth || this.gridEl.clientWidth || 800;
     const n = Math.max(1, Math.floor((largura + gap) / (this.plugin.settings.larguraCard + gap)));
+    const ativo = document.activeElement;
     grade.empty();
     const cols = [];
     for (let i = 0; i < n; i++) cols.push(grade.createDiv({ cls: 'keep-col' }));
@@ -524,71 +491,108 @@ class KeepView extends ItemView {
       for (const c of cols) if (c.offsetHeight < alvo.offsetHeight) alvo = c;
       alvo.appendChild(card);
     }
+    if (ativo && grade.contains(ativo) && document.activeElement !== ativo) ativo.focus();
   }
 
   redistribuirTudo() {
     for (const { grade, cards } of this.grades) this.distribuir(grade, cards);
   }
 
+  // ---- edição no próprio cartão ----------------------------------------
+
+  // Encerra a edição e redesenha, se algo ficou pendente.
+  terminarEdicao() {
+    this.editando = null;
+    this.recarregar();
+  }
+
   montarCard(nota) {
-    const { file, cor, fixada, corpo } = nota;
+    const { file, cor, fixada, corpo, criada } = nota;
     const card = createDiv({ cls: 'keep-card', attr: { 'data-color': cor, 'data-path': file.path } });
     let pronto = Promise.resolve();
+    let corpoAtual = corpo;
 
-    // Fixar (canto superior direito)
+    // Fixar
     const pin = card.createEl('button', { cls: 'keep-card-pin clickable-icon' + (fixada ? ' is-active' : ''), attr: { 'aria-label': fixada ? 'Desafixar' : 'Fixar', title: fixada ? 'Desafixar' : 'Fixar' } });
     setIcon(pin, fixada ? 'pin-off' : 'pin');
     pin.addEventListener('click', (ev) => { ev.stopPropagation(); this.plugin.definirFixada(file, !fixada); });
 
-    card.createDiv({ cls: 'keep-card-title', text: file.basename });
+    // Título editável
+    const titulo = card.createEl('input', { type: 'text', cls: 'keep-card-title', value: file.basename, attr: { placeholder: 'Título', spellcheck: 'false' } });
+    titulo.addEventListener('focus', () => { this.editando = file.path; });
+    titulo.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); entrarEdicao(); }
+      if (ev.key === 'Escape') { ev.preventDefault(); titulo.value = file.basename; titulo.blur(); }
+    });
+    titulo.addEventListener('change', async () => {
+      const novo = sanitizarNome(titulo.value);
+      if (!novo) { titulo.value = file.basename; new Notice('A nota precisa de um título.'); return; }
+      if (novo === file.basename) return;
+      try { await this.plugin.renomear(file, novo); }
+      catch (e) { titulo.value = file.basename; new Notice('Não foi possível renomear: ' + e.message); }
+    });
 
+    // Corpo renderizado
     const body = card.createDiv({ cls: 'keep-card-body markdown-rendered' });
-    if (corpo.trim()) {
-      pronto = MarkdownRenderer.render(this.app, corpo, body, file.path, this).then(() => {
+    const renderizarCorpo = () => {
+      body.empty();
+      body.removeClass('is-overflow');
+      if (!corpoAtual.trim()) {
+        body.createDiv({ cls: 'keep-card-empty', text: 'Clique para escrever' });
+        return Promise.resolve();
+      }
+      return MarkdownRenderer.render(this.app, corpoAtual, body, file.path, this).then(() => {
         if (body.scrollHeight > body.clientHeight + 4) body.addClass('is-overflow');
         body.querySelectorAll('input.task-list-item-checkbox').forEach((cb, i) => {
           cb.disabled = false;
-          cb.addEventListener('click', (ev) => {
-            ev.stopPropagation();
-            this.plugin.alternarTarefa(file, i);
-          });
+          cb.addEventListener('click', (ev) => { ev.stopPropagation(); this.plugin.alternarTarefa(file, i); });
         });
       });
-    } else {
-      body.createDiv({ cls: 'keep-card-empty', text: 'Nota vazia' });
-    }
+    };
+    pronto = renderizarCorpo();
 
-    // Rodapé com ações (aparece ao passar o mouse)
-    const rodape = card.createDiv({ cls: 'keep-card-footer' });
-    const btnCor = rodape.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Cor', title: 'Cor' } });
-    setIcon(btnCor, 'palette');
-    const pal = montarPaleta(rodape, cor, (c) => { this.plugin.definirCor(file, c); });
-    pal.addClass('keep-palette-pop');
-    btnCor.addEventListener('click', (ev) => { ev.stopPropagation(); pal.toggleClass('is-open', !pal.hasClass('is-open')); });
-
-    const btnAbrir = rodape.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Abrir como nota', title: 'Abrir como nota' } });
-    setIcon(btnAbrir, 'file-text');
-    btnAbrir.addEventListener('click', (ev) => { ev.stopPropagation(); this.app.workspace.getLeaf('tab').openFile(file); });
-
-    const btnExcluir = rodape.createEl('button', { cls: 'clickable-icon keep-del', attr: { 'aria-label': 'Excluir', title: 'Excluir' } });
-    setIcon(btnExcluir, 'trash-2');
-    let armado = false;
-    btnExcluir.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      if (!armado) {
-        armado = true;
-        btnExcluir.addClass('is-armed');
-        btnExcluir.setAttribute('title', 'Clique de novo para excluir');
-        setTimeout(() => { armado = false; btnExcluir.removeClass('is-armed'); btnExcluir.setAttribute('title', 'Excluir'); }, 2500);
-        return;
-      }
-      this.plugin.excluir(file);
+    // Corpo em edição (textarea no lugar do texto renderizado)
+    const ta = card.createEl('textarea', { cls: 'keep-card-edit', attr: { placeholder: 'Escreva aqui...', rows: 2 } });
+    const fmt = new Formatador(ta, () => { autoAltura(ta); salvarCorpo(); });
+    const barra = montarBarra(card, fmt);
+    barra.addClass('keep-card-toolbar');
+    let sujo = false;
+    const gravar = async () => {
+      if (!sujo) return;
+      sujo = false;
+      corpoAtual = ta.value;
+      try { await this.plugin.escreverCorpo(file, corpoAtual); }
+      catch (e) { new Notice('Não foi possível salvar: ' + e.message); }
+    };
+    const salvarCorpo = debounce(gravar, 800);
+    ta.addEventListener('input', () => { sujo = true; autoAltura(ta); salvarCorpo(); this.redistribuirTudo(); });
+    ta.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') { ev.preventDefault(); ta.blur(); return; }
+      if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') { ev.preventDefault(); ta.blur(); return; }
+      fmt.atalho(ev);
     });
 
-    // Clique no cartão abre o editor (menos em links, caixas e botões)
-    card.addEventListener('click', (ev) => {
+    const entrarEdicao = () => {
+      if (card.hasClass('is-editing')) { ta.focus(); return; }
+      this.editando = file.path;
+      ta.value = corpoAtual;
+      card.addClass('is-editing');
+      autoAltura(ta);
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      this.redistribuirTudo();
+    };
+    const sairEdicao = async () => {
+      if (!card.hasClass('is-editing')) return;
+      card.removeClass('is-editing');
+      card.removeClass('show-toolbar');
+      await gravar();
+      renderizarCorpo().then(() => this.redistribuirTudo());
+    };
+
+    body.addEventListener('click', (ev) => {
       const t = ev.target;
-      if (t.closest('button, input, .keep-palette')) return;
+      if (t.closest('input')) return;
       const link = t.closest('a');
       if (link) {
         ev.preventDefault();
@@ -596,105 +600,149 @@ class KeepView extends ItemView {
         else if (link.href) window.open(link.href);
         return;
       }
-      new EditorModal(this.app, this.plugin, file).open();
+      entrarEdicao();
     });
 
-    // Fecha a paleta ao sair do cartão
+    // Paleta de cores (abre pelo menu)
+    const pal = montarPaleta(card, cor, (c) => { pal.removeClass('is-open'); this.plugin.definirCor(file, c); });
+    pal.addClass('keep-palette-pop');
+
+    // Confirmação de exclusão, no próprio cartão
+    const confirmar = card.createDiv({ cls: 'keep-card-confirm' });
+    confirmar.createSpan({ text: 'Excluir esta nota?' });
+    const btnSim = confirmar.createEl('button', { text: 'Excluir', cls: 'keep-btn-ghost keep-del is-armed' });
+    const btnNao = confirmar.createEl('button', { text: 'Cancelar', cls: 'keep-btn-ghost' });
+    btnSim.addEventListener('click', (ev) => { ev.stopPropagation(); this.editando = null; this.plugin.excluir(file); });
+    btnNao.addEventListener('click', (ev) => { ev.stopPropagation(); confirmar.removeClass('is-open'); });
+
+    // Rodapé: data de criação + menu ⋮
+    const rodape = card.createDiv({ cls: 'keep-card-footer' });
+    rodape.createSpan({ cls: 'keep-card-date', text: criada.format('DD-MM-YY'), attr: { title: 'Criada em ' + criada.format('DD/MM/YYYY') } });
+    const btnMais = rodape.createEl('button', { cls: 'clickable-icon keep-card-more', attr: { 'aria-label': 'Mais opções', title: 'Mais opções' } });
+    setIcon(btnMais, 'more-vertical');
+    const encerrar = async () => {
+      await sairEdicao();
+      if (this.editando === file.path) this.terminarEdicao();
+    };
+    btnMais.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      card.dataset.menuAberto = '1';
+      const menu = new Menu();
+      menu.onHide(() => {
+        delete card.dataset.menuAberto;
+        setTimeout(() => { if (card.isConnected && !card.contains(document.activeElement)) encerrar(); }, 0);
+      });
+      menu.addItem((i) => i.setTitle('Formatação de texto').setIcon('type').onClick(() => { card.addClass('show-toolbar'); entrarEdicao(); }));
+      menu.addItem((i) => i.setTitle('Mudar cor').setIcon('palette').onClick(() => pal.addClass('is-open')));
+      menu.addItem((i) => i.setTitle(fixada ? 'Desafixar' : 'Fixar').setIcon(fixada ? 'pin-off' : 'pin').onClick(() => this.plugin.definirFixada(file, !fixada)));
+      menu.addItem((i) => i.setTitle('Abrir como nota').setIcon('file-text').onClick(() => this.app.workspace.getLeaf('tab').openFile(file)));
+      menu.addSeparator();
+      menu.addItem((i) => i.setTitle('Excluir').setIcon('trash-2').setWarning(true).onClick(() => confirmar.addClass('is-open')));
+      menu.showAtMouseEvent(ev);
+    });
+
+    // Quando o foco sai do cartão, encerra a edição e libera o redesenho.
+    card.addEventListener('focusout', (ev) => {
+      if (ev.relatedTarget && card.contains(ev.relatedTarget)) return;
+      if (card.dataset.menuAberto) return;
+      setTimeout(() => { if (!card.contains(document.activeElement)) encerrar(); }, 0);
+    });
     card.addEventListener('mouseleave', () => pal.removeClass('is-open'));
+
     return { card, pronto };
   }
 
-  async onClose() {
-    if (this.ro) this.ro.disconnect();
-  }
-}
+  // ---- rascunho de nota nova -------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Modal de edição
-// ---------------------------------------------------------------------------
+  novoRascunho() {
+    if (this.rascunhoEl && this.rascunhoEl.isConnected) {
+      this.rascunhoEl.querySelector('.keep-card-title').focus();
+      return;
+    }
+    this.editando = '__rascunho__';
+    const cor = this.plugin.settings.corPadrao;
+    const card = createDiv({ cls: 'keep-card keep-card-draft is-editing', attr: { 'data-color': cor } });
+    this.rascunhoEl = card;
 
-class EditorModal extends Modal {
-  constructor(app, plugin, file) {
-    super(app);
-    this.plugin = plugin;
-    this.file = file;
-    this.salvarCorpo = debounce(() => this._salvarCorpo(), 500);
-    this.pendente = false;
-  }
+    const titulo = card.createEl('input', { type: 'text', cls: 'keep-card-title', attr: { placeholder: 'Título (obrigatório)', spellcheck: 'false' } });
+    const ta = card.createEl('textarea', { cls: 'keep-card-edit', attr: { placeholder: 'Escreva aqui...', rows: 3 } });
+    const fmt = new Formatador(ta, () => autoAltura(ta));
+    const barra = montarBarra(card, fmt);
+    barra.addClass('keep-card-toolbar');
+    let corEscolhida = cor;
+    const pal = montarPaleta(card, cor, (c) => { corEscolhida = c; card.setAttribute('data-color', c); pal.removeClass('is-open'); });
+    pal.addClass('keep-palette-pop');
 
-  async onOpen() {
-    const { modalEl, contentEl } = this;
-    modalEl.addClass('keep-modal');
-    const { cor, fixada } = this.plugin.lerMeta(this.file);
-    this.cor = cor;
-    this.fixada = fixada;
-    modalEl.setAttribute('data-color', cor);
-    contentEl.empty();
+    const rodape = card.createDiv({ cls: 'keep-card-footer' });
+    rodape.createSpan({ cls: 'keep-card-date', text: moment().format('DD-MM-YY') });
+    const acoes = rodape.createDiv({ cls: 'keep-draft-actions' });
+    const btnCor = acoes.createEl('button', { cls: 'clickable-icon', attr: { title: 'Cor' } });
+    setIcon(btnCor, 'palette');
+    btnCor.addEventListener('click', (ev) => { ev.stopPropagation(); pal.toggleClass('is-open', !pal.hasClass('is-open')); });
+    const btnFmt = acoes.createEl('button', { cls: 'clickable-icon', attr: { title: 'Formatação de texto' } });
+    setIcon(btnFmt, 'type');
+    btnFmt.addEventListener('click', (ev) => { ev.stopPropagation(); card.toggleClass('show-toolbar', !card.hasClass('show-toolbar')); ta.focus(); });
+    const btnDescartar = acoes.createEl('button', { cls: 'keep-btn-ghost', text: 'Descartar' });
+    const btnSalvar = acoes.createEl('button', { cls: 'mod-cta', text: 'Salvar' });
 
-    const topo = contentEl.createDiv({ cls: 'keep-modal-top' });
-    this.tituloEl = topo.createEl('input', { type: 'text', cls: 'keep-modal-title', value: this.file.basename, placeholder: 'Título' });
-    const pin = topo.createEl('button', { cls: 'clickable-icon keep-card-pin' + (fixada ? ' is-active' : ''), attr: { title: fixada ? 'Desafixar' : 'Fixar' } });
-    setIcon(pin, fixada ? 'pin-off' : 'pin');
-    pin.addEventListener('click', async () => {
-      this.fixada = !this.fixada;
-      await this.plugin.definirFixada(this.file, this.fixada);
-      pin.toggleClass('is-active', this.fixada);
-      pin.empty(); setIcon(pin, this.fixada ? 'pin-off' : 'pin');
+    const descartar = () => {
+      card.remove();
+      this.rascunhoEl = null;
+      this.terminarEdicao();
+    };
+    const salvar = async () => {
+      const nome = sanitizarNome(titulo.value);
+      if (!nome) {
+        titulo.addClass('is-invalid');
+        new Notice('Dê um título à nota antes de salvar.');
+        titulo.focus();
+        return false;
+      }
+      try {
+        await this.plugin.criarNota({ titulo: nome, corpo: ta.value.trim() ? ta.value.trim() + '\n' : '', cor: corEscolhida });
+        descartar();
+        return true;
+      } catch (e) {
+        new Notice('Não foi possível criar a nota: ' + e.message);
+        return false;
+      }
+    };
+
+    btnDescartar.addEventListener('click', descartar);
+    btnSalvar.addEventListener('click', salvar);
+    titulo.addEventListener('input', () => titulo.removeClass('is-invalid'));
+    titulo.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); ta.focus(); }
+      if (ev.key === 'Escape') { ev.preventDefault(); descartar(); }
     });
-
-    this.ta = contentEl.createEl('textarea', { cls: 'keep-modal-body', placeholder: 'Nota', attr: { rows: 4 } });
-    this.ta.value = await this.plugin.lerCorpo(this.file);
-    const fmt = new Formatador(this.ta, () => { autoAltura(this.ta); this.marcarPendente(); });
-    this.ta.addEventListener('input', () => { autoAltura(this.ta); this.marcarPendente(); });
-    this.ta.addEventListener('keydown', (ev) => {
-      if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') { ev.preventDefault(); this.close(); return; }
+    ta.addEventListener('input', () => { autoAltura(ta); this.redistribuirTudo(); });
+    ta.addEventListener('keydown', (ev) => {
+      if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') { ev.preventDefault(); salvar(); return; }
+      if (ev.key === 'Escape') { ev.preventDefault(); descartar(); return; }
       fmt.atalho(ev);
     });
-    this.tituloEl.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') { ev.preventDefault(); this.ta.focus(); }
+    // Ao sair do rascunho: salva se tem título; descarta se está vazio; senão mantém.
+    card.addEventListener('focusout', (ev) => {
+      if (ev.relatedTarget && card.contains(ev.relatedTarget)) return;
+      setTimeout(() => {
+        if (!card.isConnected || card.contains(document.activeElement)) return;
+        if (!titulo.value.trim() && !ta.value.trim()) descartar();
+        else if (titulo.value.trim()) salvar();
+      }, 0);
     });
 
-    const rodape = contentEl.createDiv({ cls: 'keep-modal-footer' });
-    montarBarra(rodape, fmt);
-    montarPaleta(rodape, cor, async (c) => {
-      this.cor = c;
-      modalEl.setAttribute('data-color', c);
-      await this.plugin.definirCor(this.file, c);
-    });
-    const acoes = rodape.createDiv({ cls: 'keep-modal-actions' });
-    const btnAbrir = acoes.createEl('button', { cls: 'keep-btn-ghost', text: 'Abrir como nota' });
-    btnAbrir.addEventListener('click', async () => { await this.close(); this.app.workspace.getLeaf('tab').openFile(this.file); });
-    const btnExcluir = acoes.createEl('button', { cls: 'keep-btn-ghost keep-del', text: 'Excluir' });
-    let armado = false;
-    btnExcluir.addEventListener('click', async () => {
-      if (!armado) { armado = true; btnExcluir.setText('Confirmar exclusão'); btnExcluir.addClass('is-armed'); setTimeout(() => { armado = false; btnExcluir.setText('Excluir'); btnExcluir.removeClass('is-armed'); }, 2500); return; }
-      this.excluindo = true;
-      await this.plugin.excluir(this.file);
-      this.close();
-    });
-    const btnOk = acoes.createEl('button', { cls: 'mod-cta', text: 'Concluído' });
-    btnOk.addEventListener('click', () => this.close());
-
-    setTimeout(() => { autoAltura(this.ta); this.ta.focus(); this.ta.setSelectionRange(this.ta.value.length, this.ta.value.length); }, 0);
-  }
-
-  marcarPendente() { this.pendente = true; this.salvarCorpo(); }
-
-  async _salvarCorpo() {
-    if (this.excluindo || !this.pendente) return;
-    this.pendente = false;
-    try { await this.plugin.escreverCorpo(this.file, this.ta.value); }
-    catch (e) { new Notice('Não foi possível salvar a nota: ' + e.message); }
-  }
-
-  async onClose() {
-    if (this.excluindo) return;
-    await this._salvarCorpo();
-    const novoTitulo = this.tituloEl ? this.tituloEl.value : '';
-    if (novoTitulo.trim() && sanitizarNome(novoTitulo) !== this.file.basename) {
-      try { await this.plugin.renomear(this.file, novoTitulo); }
-      catch (e) { new Notice('Não foi possível renomear: ' + e.message); }
+    // Coloca o rascunho no começo da primeira grade (ou cria uma)
+    let primeira = this.gridEl.querySelector('.keep-grid');
+    if (!primeira) {
+      this.gridEl.empty();
+      primeira = this.gridEl.createDiv({ cls: 'keep-grid' });
+      this.grades.push({ grade: primeira, cards: [] });
     }
+    const entrada = this.grades.find((g) => g.grade === primeira);
+    entrada.cards.unshift(card);
+    this.distribuir(primeira, entrada.cards);
+    autoAltura(ta);
+    titulo.focus();
   }
 }
 

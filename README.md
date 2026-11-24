@@ -4,8 +4,8 @@ Notas rápidas com a cara do Google Keep dentro do Obsidian: grade de post-its c
 botão **Nova nota**, pasta fixa para tudo que você cria e barra de formatação
 (negrito, itálico, sublinhado, tachado, destaque, título, tópicos, numerada, tarefa, código).
 
-Cada nota é um arquivo `.md` comum. A cor e o estado "fixada" ficam no frontmatter
-(`color` e `pinned`), então nada depende do plugin para continuar legível.
+Cada nota é um arquivo `.md` comum. Cor, fixação e data de criação ficam no frontmatter
+(`color`, `pinned` e `created`), então nada depende do plugin para continuar legível.
 
 ![Prévia da grade de notas](preview.png)
 
@@ -31,17 +31,20 @@ Sem build, sem `npm`: o plugin é JavaScript puro.
 | Ação | Como |
 | --- | --- |
 | Abrir a grade | Ícone de post-it na barra lateral, ou comando **Abrir notas rápidas** |
-| Nova nota | Botão **Nova nota**, ícone de "arquivo +" na barra lateral, ou comando **Nova nota rápida** |
-| Nota rápida sem abrir modal | Clique em **Criar uma nota...** no topo da grade, escreva e **Salvar** (ou `Ctrl+Enter`) |
-| Editar | Clique no cartão |
-| Mudar a cor | Ícone de paleta no rodapé do cartão, ou no modal |
-| Fixar | Alfinete no canto do cartão |
+| Nova nota | Botão **Nova nota**, ícone de "arquivo +" na barra lateral, ou comando **Nova nota rápida**. Um cartão-rascunho aparece na grade; o título é obrigatório |
+| Editar o texto | Clique no texto do cartão e escreva ali mesmo. Salva sozinho ao sair do cartão (ou `Ctrl+Enter`) |
+| Editar o título | Clique no título do cartão |
+| Barra de formatação | Menu **⋮** → **Formatação de texto** (os atalhos de teclado funcionam sempre) |
+| Mudar a cor | Menu **⋮** → **Mudar cor** |
+| Fixar | Alfinete no canto do cartão, ou menu **⋮** |
 | Marcar tarefa | Clique na caixa direto no cartão |
-| Excluir | Lixeira, dois cliques (vai para a lixeira do sistema) |
-| Abrir como nota normal | Ícone de documento no rodapé do cartão |
+| Excluir | Menu **⋮** → **Excluir**, confirmado no próprio cartão (vai para a lixeira do sistema) |
+| Abrir como nota normal | Menu **⋮** → **Abrir como nota** |
+
+A data de criação aparece no canto inferior do cartão (`DD-MM-AA`) e fica gravada no frontmatter (`created`).
 
 Atalhos no editor: `Ctrl+B` negrito, `Ctrl+I` itálico, `Ctrl+U` sublinhado,
-`Ctrl+Shift+X` tachado, `Ctrl+Shift+C` tarefa, `Ctrl+Shift+8` tópicos, `Ctrl+Enter` concluir.
+`Ctrl+Shift+X` tachado, `Ctrl+Shift+C` tarefa, `Ctrl+Shift+8` tópicos, `Ctrl+Enter` concluir, `Esc` sair.
 `Enter` dentro de uma lista continua a lista; `Enter` em item vazio encerra.
 
 ## Configurações
