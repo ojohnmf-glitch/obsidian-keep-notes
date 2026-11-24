@@ -2,7 +2,7 @@
 
 const {
   Plugin, ItemView, Menu, PluginSettingTab, Setting, TFile, TFolder,
-  MarkdownRenderer, Notice, setIcon, normalizePath, moment,
+  MarkdownRenderer, Notice, Platform, setIcon, normalizePath, moment,
 } = require('obsidian');
 
 // ---------------------------------------------------------------------------
@@ -33,6 +33,8 @@ const DEFAULT_SETTINGS = {
   corPadrao: 'areia',
   incluirSubpastas: true,
   larguraCard: 240,
+  ordenacao: 'criacao',      // 'criacao' | 'edicao'
+  barraAoEditar: 'mobile',   // 'mobile' | 'sempre' | 'nunca'
 };
 
 const RE_FRONTMATTER = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/;
@@ -186,8 +188,9 @@ function montarBarra(container, formatador) {
     if (b.sep) { barra.createSpan({ cls: 'keep-toolbar-sep' }); continue; }
     const btn = barra.createEl('button', { cls: 'keep-tb-btn clickable-icon', attr: { 'aria-label': b.rotulo, title: b.rotulo, type: 'button' } });
     setIcon(btn, b.icone);
-    // mousedown para não perder a seleção do textarea
+    // mousedown/touchend com preventDefault: o textarea não perde o foco nem a seleção
     btn.addEventListener('mousedown', (ev) => { ev.preventDefault(); formatador[b.acao](); });
+    btn.addEventListener('touchend', (ev) => { ev.preventDefault(); formatador[b.acao](); }, { passive: false });
   }
   return barra;
 }
@@ -301,7 +304,10 @@ class KeepNotesPlugin extends Plugin {
     const { fm, corpo } = separarFrontmatter(atual);
     const linhas = corpo.split('\n');
     let n = -1;
+    let emCodigo = false;
     for (let i = 0; i < linhas.length; i++) {
+      if (/^\s*(```|~~~)/.test(linhas[i])) { emCodigo = !emCodigo; continue; }
+      if (emCodigo) continue;
       const m = linhas[i].match(RE_TAREFA);
       if (!m) continue;
       n++;
@@ -313,13 +319,14 @@ class KeepNotesPlugin extends Plugin {
     await this.app.vault.modify(file, fm + linhas.join('\n'));
   }
 
-  nomeUnico(pasta, nome) {
+  nomeUnico(pasta, nome, ignorar = null) {
     let candidato = nome;
     let i = 2;
-    while (this.app.vault.getAbstractFileByPath(`${pasta}/${candidato}.md`)) {
+    for (;;) {
+      const existente = this.app.vault.getAbstractFileByPath(`${pasta}/${candidato}.md`);
+      if (!existente || existente === ignorar) return candidato;
       candidato = `${nome} ${i++}`;
     }
-    return candidato;
   }
 
   async criarNota({ titulo = '', corpo = '', cor } = {}) {
@@ -336,7 +343,7 @@ class KeepNotesPlugin extends Plugin {
     const nome = sanitizarNome(novoTitulo);
     if (!nome || nome === file.basename) return file;
     const pastaPai = file.parent ? file.parent.path : this.pasta;
-    const unico = this.nomeUnico(pastaPai, nome);
+    const unico = this.nomeUnico(pastaPai, nome, file);
     await this.app.fileManager.renameFile(file, `${pastaPai}/${unico}.md`);
     return file;
   }
@@ -372,7 +379,7 @@ class KeepView extends ItemView {
     this.plugin = plugin;
     this.busca = '';
     this.grades = [];
-    this.editando = null;        // path do cartão em edição (ou '__rascunho__')
+    this.editando = null;        // elemento do cartão em edição (nota ou rascunho)
     this.renderPendente = false;
     this.rascunhoEl = null;
     this.recarregar = debounce(() => this.render(), 150);
@@ -399,8 +406,13 @@ class KeepView extends ItemView {
     btnNova.createSpan({ text: 'Nova nota' });
     btnNova.addEventListener('click', () => this.novoRascunho());
 
+    this.draftEl = root.createDiv({ cls: 'keep-draft-area' });
     this.gridEl = root.createDiv({ cls: 'keep-sections' });
-    this.ro = new ResizeObserver(() => this.aoRedimensionar());
+    this.larguraAnterior = 0;
+    this.ro = new ResizeObserver((entradas) => {
+      const w = Math.round(entradas[0].contentRect.width);
+      if (w !== this.larguraAnterior) { this.larguraAnterior = w; this.aoRedimensionar(); }
+    });
     this.ro.observe(this.gridEl);
 
     const v = this.app.vault;
@@ -429,7 +441,10 @@ class KeepView extends ItemView {
       const corpo = await this.plugin.lerCorpo(file);
       return { file, corpo, ...meta };
     }));
-    notas.sort((a, b) => (b.fixada - a.fixada) || (b.file.stat.mtime - a.file.stat.mtime));
+    const chave = this.plugin.settings.ordenacao === 'edicao'
+      ? (n) => n.file.stat.mtime
+      : (n) => n.criada.valueOf();
+    notas.sort((a, b) => (b.fixada - a.fixada) || (chave(b) - chave(a)) || a.file.basename.localeCompare(b.file.basename));
     if (!this.busca) return notas;
     return notas.filter((n) => (n.file.basename + '\n' + n.corpo).toLowerCase().includes(this.busca));
   }
@@ -472,13 +487,16 @@ class KeepView extends ItemView {
       prontos.push(pronto);
     }
     this.grades.push({ grade, cards });
-    this.distribuir(grade, cards);
+    this.distribuir(grade, cards, true);
     Promise.all(prontos).then(() => this.distribuir(grade, cards));
   }
 
   // Masonry: cada cartão vai para a coluna mais baixa no momento.
-  distribuir(grade, cards) {
+  distribuir(grade, cards, forcar = false) {
     if (!grade.isConnected) return;
+    // Durante a edição o layout fica congelado: o cartão não pode trocar de coluna com o cursor dentro.
+    if (this.editando && !forcar) { this.layoutPendente = true; return; }
+    this.layoutPendente = false;
     const gap = 14;
     const largura = grade.clientWidth || this.gridEl.clientWidth || 800;
     const n = Math.max(1, Math.floor((largura + gap) / (this.plugin.settings.larguraCard + gap)));
@@ -503,12 +521,29 @@ class KeepView extends ItemView {
   // Encerra a edição e redesenha, se algo ficou pendente.
   terminarEdicao() {
     this.editando = null;
+    this.layoutPendente = false;
     this.recarregar();
+  }
+
+  // Abre a paleta de um cartão e fecha ao clicar/tocar fora dela.
+  abrirPaleta(pal) {
+    pal.addClass('is-open');
+    const fechar = (ev) => {
+      if (pal.contains(ev.target)) return;
+      pal.removeClass('is-open');
+      document.removeEventListener('pointerdown', fechar, true);
+    };
+    setTimeout(() => document.addEventListener('pointerdown', fechar, true), 0);
+  }
+
+  mostrarBarraAoEditar() {
+    const m = this.plugin.settings.barraAoEditar;
+    return m === 'sempre' || (m === 'mobile' && Platform.isMobile);
   }
 
   montarCard(nota) {
     const { file, cor, fixada, corpo, criada } = nota;
-    const card = createDiv({ cls: 'keep-card', attr: { 'data-color': cor, 'data-path': file.path } });
+    const card = createDiv({ cls: 'keep-card', attr: { 'data-color': cor } });
     let pronto = Promise.resolve();
     let corpoAtual = corpo;
 
@@ -519,7 +554,7 @@ class KeepView extends ItemView {
 
     // Título editável
     const titulo = card.createEl('input', { type: 'text', cls: 'keep-card-title', value: file.basename, attr: { placeholder: 'Título', spellcheck: 'false' } });
-    titulo.addEventListener('focus', () => { this.editando = file.path; });
+    titulo.addEventListener('focus', () => { this.editando = card; });
     titulo.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') { ev.preventDefault(); entrarEdicao(); }
       if (ev.key === 'Escape') { ev.preventDefault(); titulo.value = file.basename; titulo.blur(); }
@@ -565,7 +600,7 @@ class KeepView extends ItemView {
       catch (e) { new Notice('Não foi possível salvar: ' + e.message); }
     };
     const salvarCorpo = debounce(gravar, 800);
-    ta.addEventListener('input', () => { sujo = true; autoAltura(ta); salvarCorpo(); this.redistribuirTudo(); });
+    ta.addEventListener('input', () => { sujo = true; autoAltura(ta); salvarCorpo(); });
     ta.addEventListener('keydown', (ev) => {
       if (ev.key === 'Escape') { ev.preventDefault(); ta.blur(); return; }
       if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') { ev.preventDefault(); ta.blur(); return; }
@@ -574,25 +609,27 @@ class KeepView extends ItemView {
 
     const entrarEdicao = () => {
       if (card.hasClass('is-editing')) { ta.focus(); return; }
-      this.editando = file.path;
+      this.editando = card;
       ta.value = corpoAtual;
       card.addClass('is-editing');
+      if (this.mostrarBarraAoEditar()) card.addClass('show-toolbar');
       autoAltura(ta);
       ta.focus();
       ta.setSelectionRange(ta.value.length, ta.value.length);
-      this.redistribuirTudo();
     };
     const sairEdicao = async () => {
       if (!card.hasClass('is-editing')) return;
       card.removeClass('is-editing');
       card.removeClass('show-toolbar');
       await gravar();
-      renderizarCorpo().then(() => this.redistribuirTudo());
+      await renderizarCorpo();
     };
 
     body.addEventListener('click', (ev) => {
       const t = ev.target;
       if (t.closest('input')) return;
+      const sel = window.getSelection();
+      if (sel && sel.toString() && body.contains(sel.anchorNode)) return; // usuário está copiando texto
       const link = t.closest('a');
       if (link) {
         ev.preventDefault();
@@ -612,7 +649,7 @@ class KeepView extends ItemView {
     confirmar.createSpan({ text: 'Excluir esta nota?' });
     const btnSim = confirmar.createEl('button', { text: 'Excluir', cls: 'keep-btn-ghost keep-del is-armed' });
     const btnNao = confirmar.createEl('button', { text: 'Cancelar', cls: 'keep-btn-ghost' });
-    btnSim.addEventListener('click', (ev) => { ev.stopPropagation(); this.editando = null; this.plugin.excluir(file); });
+    btnSim.addEventListener('click', (ev) => { ev.stopPropagation(); if (this.editando === card) this.editando = null; this.plugin.excluir(file); });
     btnNao.addEventListener('click', (ev) => { ev.stopPropagation(); confirmar.removeClass('is-open'); });
 
     // Rodapé: data de criação + menu ⋮
@@ -622,7 +659,7 @@ class KeepView extends ItemView {
     setIcon(btnMais, 'more-vertical');
     const encerrar = async () => {
       await sairEdicao();
-      if (this.editando === file.path) this.terminarEdicao();
+      if (this.editando === card) this.terminarEdicao();
     };
     btnMais.addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -633,7 +670,7 @@ class KeepView extends ItemView {
         setTimeout(() => { if (card.isConnected && !card.contains(document.activeElement)) encerrar(); }, 0);
       });
       menu.addItem((i) => i.setTitle('Formatação de texto').setIcon('type').onClick(() => { card.addClass('show-toolbar'); entrarEdicao(); }));
-      menu.addItem((i) => i.setTitle('Mudar cor').setIcon('palette').onClick(() => pal.addClass('is-open')));
+      menu.addItem((i) => i.setTitle('Mudar cor').setIcon('palette').onClick(() => this.abrirPaleta(pal)));
       menu.addItem((i) => i.setTitle(fixada ? 'Desafixar' : 'Fixar').setIcon(fixada ? 'pin-off' : 'pin').onClick(() => this.plugin.definirFixada(file, !fixada)));
       menu.addItem((i) => i.setTitle('Abrir como nota').setIcon('file-text').onClick(() => this.app.workspace.getLeaf('tab').openFile(file)));
       menu.addSeparator();
@@ -647,7 +684,6 @@ class KeepView extends ItemView {
       if (card.dataset.menuAberto) return;
       setTimeout(() => { if (!card.contains(document.activeElement)) encerrar(); }, 0);
     });
-    card.addEventListener('mouseleave', () => pal.removeClass('is-open'));
 
     return { card, pronto };
   }
@@ -659,10 +695,10 @@ class KeepView extends ItemView {
       this.rascunhoEl.querySelector('.keep-card-title').focus();
       return;
     }
-    this.editando = '__rascunho__';
     const cor = this.plugin.settings.corPadrao;
     const card = createDiv({ cls: 'keep-card keep-card-draft is-editing', attr: { 'data-color': cor } });
     this.rascunhoEl = card;
+    this.editando = card;
 
     const titulo = card.createEl('input', { type: 'text', cls: 'keep-card-title', attr: { placeholder: 'Título (obrigatório)', spellcheck: 'false' } });
     const ta = card.createEl('textarea', { cls: 'keep-card-edit', attr: { placeholder: 'Escreva aqui...', rows: 3 } });
@@ -678,7 +714,7 @@ class KeepView extends ItemView {
     const acoes = rodape.createDiv({ cls: 'keep-draft-actions' });
     const btnCor = acoes.createEl('button', { cls: 'clickable-icon', attr: { title: 'Cor' } });
     setIcon(btnCor, 'palette');
-    btnCor.addEventListener('click', (ev) => { ev.stopPropagation(); pal.toggleClass('is-open', !pal.hasClass('is-open')); });
+    btnCor.addEventListener('click', (ev) => { ev.stopPropagation(); if (pal.hasClass('is-open')) pal.removeClass('is-open'); else this.abrirPaleta(pal); });
     const btnFmt = acoes.createEl('button', { cls: 'clickable-icon', attr: { title: 'Formatação de texto' } });
     setIcon(btnFmt, 'type');
     btnFmt.addEventListener('click', (ev) => { ev.stopPropagation(); card.toggleClass('show-toolbar', !card.hasClass('show-toolbar')); ta.focus(); });
@@ -688,7 +724,7 @@ class KeepView extends ItemView {
     const descartar = () => {
       card.remove();
       this.rascunhoEl = null;
-      this.terminarEdicao();
+      if (this.editando === card) this.terminarEdicao();
     };
     const salvar = async () => {
       const nome = sanitizarNome(titulo.value);
@@ -715,7 +751,7 @@ class KeepView extends ItemView {
       if (ev.key === 'Enter') { ev.preventDefault(); ta.focus(); }
       if (ev.key === 'Escape') { ev.preventDefault(); descartar(); }
     });
-    ta.addEventListener('input', () => { autoAltura(ta); this.redistribuirTudo(); });
+    ta.addEventListener('input', () => autoAltura(ta));
     ta.addEventListener('keydown', (ev) => {
       if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') { ev.preventDefault(); salvar(); return; }
       if (ev.key === 'Escape') { ev.preventDefault(); descartar(); return; }
@@ -731,18 +767,13 @@ class KeepView extends ItemView {
       }, 0);
     });
 
-    // Coloca o rascunho no começo da primeira grade (ou cria uma)
-    let primeira = this.gridEl.querySelector('.keep-grid');
-    if (!primeira) {
-      this.gridEl.empty();
-      primeira = this.gridEl.createDiv({ cls: 'keep-grid' });
-      this.grades.push({ grade: primeira, cards: [] });
-    }
-    const entrada = this.grades.find((g) => g.grade === primeira);
-    entrada.cards.unshift(card);
-    this.distribuir(primeira, entrada.cards);
+    if (this.mostrarBarraAoEditar()) card.addClass('show-toolbar');
+    this.draftEl.empty();
+    this.draftEl.appendChild(card);
+    this.draftEl.style.setProperty('--keep-card-w', `${this.plugin.settings.larguraCard}px`);
     autoAltura(ta);
     titulo.focus();
+    card.scrollIntoView({ block: 'nearest' });
   }
 }
 
@@ -779,6 +810,25 @@ class KeepSettingTab extends PluginSettingTab {
       .setDesc('Mostrar também notas que estejam em subpastas da pasta das notas.')
       .addToggle((t) => t.setValue(this.plugin.settings.incluirSubpastas)
         .onChange(async (v) => { this.plugin.settings.incluirSubpastas = v; await this.plugin.salvarSettings(); }));
+
+    new Setting(containerEl)
+      .setName('Ordenação')
+      .setDesc('Notas fixadas vêm sempre primeiro.')
+      .addDropdown((d) => d
+        .addOption('criacao', 'Mais recentes primeiro (data de criação)')
+        .addOption('edicao', 'Editadas por último primeiro')
+        .setValue(this.plugin.settings.ordenacao)
+        .onChange(async (v) => { this.plugin.settings.ordenacao = v; await this.plugin.salvarSettings(); }));
+
+    new Setting(containerEl)
+      .setName('Barra de formatação ao editar')
+      .setDesc('Quando mostrar a barra automaticamente. Pelo menu ⋮ ela pode ser aberta a qualquer momento.')
+      .addDropdown((d) => d
+        .addOption('mobile', 'Só no celular e tablet')
+        .addOption('sempre', 'Sempre')
+        .addOption('nunca', 'Nunca')
+        .setValue(this.plugin.settings.barraAoEditar)
+        .onChange(async (v) => { this.plugin.settings.barraAoEditar = v; await this.plugin.salvarSettings(); }));
 
     new Setting(containerEl)
       .setName('Largura dos cartões')

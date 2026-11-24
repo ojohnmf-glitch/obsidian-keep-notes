@@ -47,11 +47,19 @@ Atalhos no editor: `Ctrl+B` negrito, `Ctrl+I` itálico, `Ctrl+U` sublinhado,
 `Ctrl+Shift+X` tachado, `Ctrl+Shift+C` tarefa, `Ctrl+Shift+8` tópicos, `Ctrl+Enter` concluir, `Esc` sair.
 `Enter` dentro de uma lista continua a lista; `Enter` em item vazio encerra.
 
+## No celular e tablet
+
+Funciona no Obsidian Mobile: uma coluna, botão flutuante **+** para nova nota, alvos de toque maiores
+e barra de formatação aberta automaticamente ao editar (ajustável nas configurações).
+Os comandos **Abrir notas rápidas** e **Nova nota rápida** podem ir para a barra de ferramentas do mobile.
+
 ## Configurações
 
 - **Pasta das notas**: padrão `Notas rápidas`. Criada automaticamente.
 - **Cor padrão** das notas novas.
 - **Incluir subpastas** da pasta das notas na grade.
+- **Ordenação**: por data de criação (padrão, estável) ou por última edição. Fixadas vêm sempre primeiro.
+- **Barra de formatação ao editar**: só no mobile (padrão), sempre ou nunca.
 - **Largura dos cartões**.
 
 ## Cores
