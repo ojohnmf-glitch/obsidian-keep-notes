@@ -1,12 +1,14 @@
-# Publica uma release do plugin a cada tag de versão (ex.: 0.1.0),
-# anexando manifest.json, main.js e styles.css. É o formato que o
-# Obsidian e o BRAT esperam.
+# Publica uma release do plugin com manifest.json, main.js e styles.css
+# anexados (formato que o Obsidian e o BRAT esperam). A versão vem do
+# manifest.json; a tag é criada pela própria Action.
+# Dispara ao mudar o manifest no main ou manualmente (Actions → Release → Run workflow).
 name: Release
 
 on:
   push:
-    tags:
-      - "[0-9]+.[0-9]+.[0-9]+"
+    branches: [main]
+    paths: [manifest.json]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -17,18 +19,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Confere se a tag bate com o manifest
-        run: |
-          versao=$(node -p "require('./manifest.json').version")
-          if [ "$versao" != "$GITHUB_REF_NAME" ]; then
-            echo "Tag $GITHUB_REF_NAME difere da versão $versao no manifest.json"; exit 1
-          fi
-
-      - name: Cria a release
+      - name: Cria a release se a versão ainda não existe
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --notes "Instale com BRAT ou copie manifest.json, main.js e styles.css para .obsidian/plugins/keep-notes/." \
+          versao=$(node -p "require('./manifest.json').version")
+          if gh release view "$versao" >/dev/null 2>&1; then
+            echo "Release $versao já existe; nada a fazer."; exit 0
+          fi
+          gh release create "$versao" \
+            --target "$GITHUB_SHA" \
+            --title "$versao" \
+            --notes "Instale com BRAT (ojohnmf-glitch/obsidian-keep-notes) ou copie manifest.json, main.js e styles.css para .obsidian/plugins/keep-notes/." \
             manifest.json main.js styles.css
