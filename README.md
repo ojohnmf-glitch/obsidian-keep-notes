@@ -9,6 +9,14 @@ Cada nota é um arquivo `.md` comum. A cor e o estado "fixada" ficam no frontmat
 
 ![Prévia da grade de notas](preview.png)
 
+## Instalação pelo BRAT (sem baixar nada)
+
+1. Instale o plugin da comunidade **BRAT** (Obsidian42 - BRAT) e ative.
+2. Em **Configurações → BRAT → Add beta plugin**, cole `ojohnmf-glitch/obsidian-keep-notes`.
+3. Ative **Keep Notes** em Plugins da comunidade.
+
+O BRAT também atualiza o plugin sozinho quando sair uma versão nova.
+
 ## Instalação manual
 
 1. Na pasta do seu cofre, crie `.obsidian/plugins/keep-notes/`.
